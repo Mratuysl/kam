@@ -1,22 +1,24 @@
 package main
 
 import (
+	"encoding/json"
+	"strings"
 	"fmt"
 	"os"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/spf13/cobra"
 
-	"github.com/yourusername/kam/ai"
-	"github.com/yourusername/kam/config"
-	"github.com/yourusername/kam/k8s"
-	"github.com/yourusername/kam/tui"
+	"github.com/Mratuysl/kam/ai"
+	"github.com/Mratuysl/kam/config"
+	"github.com/Mratuysl/kam/k8s"
+	"github.com/Mratuysl/kam/tui"
 )
 
 var rootCmd = &cobra.Command{
 	Use:   "kam",
 	Short: "⎈ kam — Doğal dille Kubernetes yönetimi",
-	Long: `kai, doğal dil komutlarını kubectl'e çeviren AI destekli 
+	Long: `kai, doğal dil komutlarını kubectl'e çeviren AI destekli
 bir Kubernetes terminal aracıdır.
 
 Örnek kullanım:
@@ -73,7 +75,7 @@ func runTUI(cmd *cobra.Command, args []string) error {
 	_ = cfg
 
 	m := tui.New(provider, client)
-	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion())
+	p := tea.NewProgram(m, tea.WithAltScreen())
 
 	if _, err := p.Run(); err != nil {
 		return fmt.Errorf("TUI hatası: %w", err)
@@ -92,15 +94,58 @@ func runAsk(cmd *cobra.Command, args []string) error {
 	query := args[0]
 	ctx := cmd.Context()
 
-	// AI'a sor
 	fmt.Printf("🤔 Sorgu: %s\n\n", query)
 	raw, err := provider.Complete(ctx, ai.K8sSystemPrompt, query)
 	if err != nil {
 		return err
 	}
 
-	fmt.Printf("AI yanıtı:\n%s\n", raw)
-	_ = client
+	// JSON parse et
+	raw = strings.TrimSpace(raw)
+	raw = strings.TrimPrefix(raw, "```json")
+	raw = strings.TrimPrefix(raw, "```")
+	raw = strings.TrimSuffix(raw, "```")
+	raw = strings.TrimSpace(raw)
+
+	var response struct {
+		Commands    []string `json:"commands"`
+		Explanation string   `json:"explanation"`
+		Warning     string   `json:"warning"`
+		Dangerous   bool     `json:"dangerous"`
+	}
+
+	if err := json.Unmarshal([]byte(raw), &response); err != nil {
+		fmt.Printf("Ham yanıt: %s\n", raw)
+		return err
+	}
+
+	fmt.Printf("📋 %s\n\n", response.Explanation)
+
+	if response.Dangerous {
+		fmt.Printf("⚠️  TEHLİKELİ: %s\n", response.Warning)
+		fmt.Print("Devam etmek istiyor musun? (evet/hayır): ")
+		var confirm string
+		fmt.Scanln(&confirm)
+		if confirm != "evet" {
+			fmt.Println("İptal edildi.")
+			return nil
+		}
+	}
+
+	for _, command := range response.Commands {
+		fmt.Printf("⚡ %s\n", command)
+		result, err := client.Run(ctx, command)
+		if err != nil {
+			return err
+		}
+		if result.ExitCode != 0 {
+			fmt.Printf("✗ Hata: %s\n", result.Stderr)
+		} else {
+			fmt.Printf("%s\n", result.Stdout)
+		}
+		fmt.Printf("⏱ %s\n\n", result.Duration)
+	}
+
 	return nil
 }
 
